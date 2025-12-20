@@ -1,0 +1,36 @@
+{
+    "manifest_version": 3,
+    "name": "Talking AI",
+    "version": "0.0.0.1",
+    "description": "A chrome extension that reads webpages and selected text aload using AI voices and interact with AI giving you the summary of the page",
+    "permissions": [
+        "nativeMessaging",
+        "activeTab",
+        "scripting",
+        "storage",
+        "tts"
+    ],
+    "action": {
+        "default_popup": "index.html",
+        "default_icon": {
+            "16": "icons/icon16.png",
+            "48": "icons/icon64.png",
+            "128": "icons/icon128.png"
+        }
+    },
+    "icons": {
+        "16": "icons/icon16.png",
+        "48": "icons/icon64.png",
+        "128": "icons/icon128.png"
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "<all_urls>"
+            ],
+            "js": [
+                "cmd/content.js"
+            ]
+        }
+    ]
+}
