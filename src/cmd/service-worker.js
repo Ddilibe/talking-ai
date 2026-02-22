@@ -75,6 +75,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     // Check if the URL is a PDF and NOT already being handled by our extension
     if (changeInfo.url &&
         changeInfo.url.toLowerCase().endsWith(".pdf") &&
+        changeInfo.url.toLowerCase().startsWith("file:") &&
         !changeInfo.url.includes(chrome.runtime.id)) {
 
         const viewerUrl = chrome.runtime.getURL("pdfjs/web/viewer.html");
