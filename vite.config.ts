@@ -21,6 +21,10 @@ export default defineConfig({
       {
         src: "src/cmd",
         dest: "."
+      },
+      {
+        src: "src/pdfjs",
+        dest: "."
       }
     ],
   }),

@@ -1,14 +1,29 @@
 {
-    "manifest_version": 3,
     "name": "Talking AI",
     "version": "0.0.0.1",
+    "manifest_version": 3,
     "description": "A chrome extension that reads webpages and selected text aload using AI voices and interact with AI giving you the summary of the page",
     "permissions": [
+        "unlimitedStorage",
         "nativeMessaging",
+        "contextMenus",
         "activeTab",
         "scripting",
         "storage",
         "tts"
+    ],
+    "commands": {
+        "get-pdf-selection": {
+            "suggested_key": {
+                "default": "Ctrl+Shift+Y",
+                "mac": "Command+Shift+Y"
+            },
+            "description": "Capture highlighted text in PDF"
+        }
+    },
+    "host_permissions": [
+        "<all_urls>",
+        "file://*/*"
     ],
     "action": {
         "default_popup": "index.html",
@@ -23,6 +38,10 @@
         "48": "icons/icon64.png",
         "128": "icons/icon128.png"
     },
+    "background": {
+        "service_worker": "cmd/service-worker.js",
+        "type": "module"
+    },
     "content_scripts": [
         {
             "matches": [
@@ -30,7 +49,10 @@
             ],
             "js": [
                 "cmd/content.js"
-            ]
+            ],
+            "all_frames": true,
+            "match_about_blank": true,
+            "run_at": "document_start"
         }
     ]
 }
