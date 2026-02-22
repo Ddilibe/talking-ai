@@ -1,6 +1,6 @@
 {
     "name": "Talking AI",
-    "version": "0.0.0.1",
+    "version": "0.1.0.1",
     "manifest_version": 3,
     "description": "A chrome extension that reads webpages and selected text aload using AI voices and interact with AI giving you the summary of the page",
     "permissions": [
