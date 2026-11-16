@@ -12,13 +12,28 @@ import { DEFAULT_SETTINGS, getSettings, saveSettings } from "@/lib/utils";
 export default function Settings() {
     const [settings, setSettings] =
         useState<typeof DEFAULT_SETTINGS>(DEFAULT_SETTINGS);
+    const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
 
     useEffect(() => {
-        getSettings().then(setSettings);
+        getSettings()
+            .then(setSettings)
+            .catch((error) => {
+                console.error("[Settings] Failed to load settings:", error);
+            });
     }, []);
 
-    const updateSetting = (key: keyof typeof DEFAULT_SETTINGS, value: any) => {
+    const updateSetting = <K extends keyof typeof DEFAULT_SETTINGS>(
+        key: K,
+        value: (typeof DEFAULT_SETTINGS)[K]
+    ) => {
         setSettings(prev => ({ ...prev, [key]: value }));
+        setSaveState("idle");
+    };
+
+    const handleSave = async () => {
+        setSaveState("saving");
+        const result = await saveSettings(settings);
+        setSaveState(result.ok ? "saved" : "error");
     };
 
     return (
@@ -46,7 +61,7 @@ export default function Settings() {
                         }
                     />
                     <p className="text-xs text-muted-foreground">
-                        Stored locally. Never shared or uploaded.
+                        Synced to your Chrome profile. Never shared with third parties.
                     </p>
                 </section>
 
@@ -81,13 +96,24 @@ export default function Settings() {
                 </section>
 
                 {/* Save */}
-                <div className="pt-2">
+                <div className="flex items-center gap-3 pt-2">
                     <Button
-                        onClick={() => saveSettings(settings)}
+                        onClick={handleSave}
+                        disabled={saveState === "saving"}
                         className="w-fit"
                     >
-                        Save Settings
+                        {saveState === "saving" ? "Saving..." : "Save Settings"}
                     </Button>
+                    {saveState === "saved" && (
+                        <span className="text-xs text-green-600">
+                            Settings saved.
+                        </span>
+                    )}
+                    {saveState === "error" && (
+                        <span className="text-xs text-destructive">
+                            Could not save settings. Check the console for details.
+                        </span>
+                    )}
                 </div>
             </div>
         </div>
