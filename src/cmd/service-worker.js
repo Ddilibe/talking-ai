@@ -1,97 +1,143 @@
-// import { KokoroTTS, TextSplitterStream } from "./kokoro.web.js";
+const DEFAULT_SETTINGS = {
+    apiKey: "",
+    model: "gpt-3.5-turbo",
+    voice: "",
+    readAloud: false,
+    autoExplain: false,
+    rate: 1,
+    pitch: 1,
+    customPrompt: "",
+};
 
+let settings = { ...DEFAULT_SETTINGS };
 
-class SettingConfig {
-    constructor() {
-        this.apiKey = "";
-        this.voice = "";
-        this.readAloud = false;
-        this.autoExplain = false;
-        this.rate = 1;
-        this.pitch = 1;
-        this.customPrompt = "";
-        this.model_id = "onnx-community/Kokoro-82M-v1.0-ONNX";
-        this.model = null;
-
-
-    }
-    async update_from_storage() {
-        // const tts = await KokoroTTS.from_pretrained(this.model_id, {
-        //     dtype: "fp32", // Options: "fp32", "fp16", "q8", "q4", "q4f16"
-        //     // device: "webgpu", // Options: "wasm", "webgpu" (web) or "cpu" (node).
-        // });
-        // this.tts = tts;
-    }
-
-    data() {
-        let new_data = {
-            apiKey: this.apiKey,
-            model: this.model,
-            voice: this.voice,
-            readAloud: this.readAloud,
-            autoExplain: this.autoExplain,
-            rate: this.rate,
-            pitch: this.pitch,
-            customPrompt: this.customPrompt,
-        };
-        return new_data;
-    }
-
-    async speak(text) {
-        const splitter = new TextSplitterStream();
-        const stream = this.tts.stream(splitter);
-        (async () => {
-            let i = 0;
-            for await (const { text, phonemes, audio } of stream) {
-                console.log({ text, phonemes });
-                audio.save(`audio-${i++}.wav`);
-            }
-        })();
-
-        const tokens = text.match(/\s*\S+/g);
-        for (const token of tokens) {
-            splitter.push(token);
-            await new Promise((resolve) => setTimeout(resolve, 10));
-        }
-        splitter.close();
-    }
-
+async function loadSettings() {
+    const stored = await chrome.storage.sync.get(Object.keys(DEFAULT_SETTINGS));
+    settings = { ...DEFAULT_SETTINGS, ...stored };
+    return settings;
 }
 
-let SETTINGS = new SettingConfig();
-SETTINGS.update_from_storage().then(() => {
-    console.log("Kokoro model loaded");
-}).catch(console.error);
+async function broadcastSettings() {
+    const tabs = await chrome.tabs.query({});
+    const message = { action: "updateSettings", settings };
+    const results = await Promise.allSettled(
+        tabs
+            .filter((tab) => typeof tab.id === "number")
+            .map((tab) => chrome.tabs.sendMessage(tab.id, message))
+    );
+    const delivered = results.filter((result) => result.status === "fulfilled").length;
+    console.log(`[Service Worker] Broadcast settings to ${delivered}/${results.length} tabs`);
+}
+
+async function speakWithChromeTts(text) {
+    if (!text?.trim()) {
+        return { status: "error", error: "No text provided" };
+    }
+
+    const currentSettings = await loadSettings();
+
+    await chrome.tts.stop();
+
+    return new Promise((resolve, reject) => {
+        chrome.tts.speak(text, {
+            rate: currentSettings.rate || 1,
+            pitch: currentSettings.pitch || 1,
+            voiceName: currentSettings.voice || undefined,
+            onEvent: (event) => {
+                if (event.type === "end") {
+                    resolve({ status: "spoken" });
+                } else if (event.type === "interrupted" || event.type === "cancelled") {
+                    resolve({ status: "stopped" });
+                } else if (event.type === "error") {
+                    reject(new Error(event.errorMessage || "Speech playback failed"));
+                }
+            },
+        });
+    });
+}
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== "sync") {
+        return;
+    }
+
+    const updatedKeys = [];
+    for (const [key, value] of Object.entries(changes)) {
+        if (key in settings) {
+            settings[key] = value.newValue;
+            updatedKeys.push(key);
+        }
+    }
+
+    if (updatedKeys.length === 0) {
+        return;
+    }
+
+    console.log("[Service Worker] Settings changed:", updatedKeys.join(", "));
+    broadcastSettings().catch((error) => {
+        console.error("[Service Worker] Failed to broadcast settings:", error);
+    });
+});
+
+loadSettings().catch(console.error);
 
 chrome.commands.onCommand.addListener((command) => {
-    if (command === "get-pdf-selection") {
-        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-            chrome.tabs.sendMessage(tabs[0].id, { action: "trigger-capture" });
-        });
+    if (command !== "get-pdf-selection") {
+        return;
     }
-});
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-    // Check if the URL is a PDF and NOT already being handled by our extension
-    if (changeInfo.url &&
-        changeInfo.url.toLowerCase().endsWith(".pdf") &&
-        changeInfo.url.toLowerCase().startsWith("file:") &&
-        !changeInfo.url.includes(chrome.runtime.id)) {
-
-        const viewerUrl = chrome.runtime.getURL("pdfjs/web/viewer.html");
-        const redirectUrl = `${viewerUrl}?file=${encodeURIComponent(changeInfo.url)}`;
-
-        chrome.tabs.update(tabId, { url: redirectUrl });
-    }
-});
-
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.action === "doSomething") {
-        if (!SETTINGS.tts) {
-            sendResponse({ error: "Model not loaded yet" });
-            return true;
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const activeTabId = tabs[0]?.id;
+        if (activeTabId) {
+            chrome.tabs.sendMessage(activeTabId, { action: "trigger-capture" });
         }
-        SETTINGS.speak(message.data);
+    });
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    const nextUrl = changeInfo.url?.toLowerCase();
+    if (
+        !nextUrl ||
+        !nextUrl.endsWith(".pdf") ||
+        !nextUrl.startsWith("file:") ||
+        nextUrl.includes(chrome.runtime.id)
+    ) {
+        return;
+    }
+
+    const viewerUrl = chrome.runtime.getURL("pdfjs/web/viewer.html");
+    const redirectUrl = `${viewerUrl}?file=${encodeURIComponent(changeInfo.url)}`;
+    chrome.tabs.update(tabId, { url: redirectUrl });
+});
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message.action === "speakText") {
+        speakWithChromeTts(message.text)
+            .then(sendResponse)
+            .catch((error) => {
+                console.error("[Service Worker] speakText failed:", error);
+                sendResponse({ status: "error", error: error.message });
+            });
+        return true;
+    }
+
+    if (message.action === "stopSpeaking") {
+        chrome.tts.stop()
+            .then(() => sendResponse({ status: "stopped" }))
+            .catch((error) => {
+                console.error("[Service Worker] stopSpeaking failed:", error);
+                sendResponse({ status: "error", error: error.message });
+            });
+        return true;
+    }
+
+    if (message.action === "getSpeechSettings") {
+        loadSettings()
+            .then((loadedSettings) => sendResponse({ status: "ok", settings: loadedSettings }))
+            .catch((error) => {
+                console.error("[Service Worker] getSpeechSettings failed:", error);
+                sendResponse({ status: "error", error: error.message });
+            });
         return true;
     }
 });

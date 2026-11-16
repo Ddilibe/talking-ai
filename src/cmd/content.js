@@ -1,107 +1,107 @@
-// import { OpenRouter } from "@openrouter/sdk";
-
-// importScripts("./kokoro.web.js");
-
-// const { KokoroTTS, TextSplitterStream } = require("./kokoro.web.js");
 console.log("Talking AI content script injected");
+
+const DEFAULT_SETTINGS = {
+    apiKey: "",
+    model: "gpt-3.5-turbo",
+    voice: "",
+    readAloud: false,
+    autoExplain: false,
+    rate: 1,
+    pitch: 1,
+    customPrompt: "",
+};
 
 let speakButton = null;
 let lastSelectionText = "";
 
-
 class SettingConfig {
     constructor() {
-        this.apiKey = "";
-        this.voice = "";
-        this.readAloud = false;
-        this.autoExplain = false;
-        this.rate = 1;
-        this.pitch = 1;
-        this.customPrompt = "";
-        this.model_id = "onnx-community/Kokoro-82M-v1.0-ONNX";
-        this.model = null;
-
-
-    }
-    async update_from_storage() {
-        // const tts = await KokoroTTS.from_pretrained(model_id, {
-        //     dtype: "fp32", // Options: "fp32", "fp16", "q8", "q4", "q4f16"
-        //     // device: "webgpu", // Options: "wasm", "webgpu" (web) or "cpu" (node).
-        // });
-
-        // this.model = "gpt-3.5-turbo";
-        // name
+        Object.assign(this, DEFAULT_SETTINGS);
     }
 
-    data() {
-        let new_data = {
-            apiKey: this.apiKey,
-            model: this.model,
-            voice: this.voice,
-            readAloud: this.readAloud,
-            autoExplain: this.autoExplain,
-            rate: this.rate,
-            pitch: this.pitch,
-            customPrompt: this.customPrompt,
-        };
-        return new_data;
+    async loadFromStorage() {
+        const stored = await chrome.storage.sync.get(Object.keys(DEFAULT_SETTINGS));
+        Object.assign(this, DEFAULT_SETTINGS, stored);
+        console.log(
+            "[Content] Loaded settings from storage:",
+            Object.keys(stored).join(", ") || "defaults"
+        );
     }
 
     async speak(text) {
-        const splitter = new TextSplitterStream();
-        const stream = tts.stream(splitter);
-        (async () => {
-            let i = 0;
-            for await (const { text, phonemes, audio } of stream) {
-                console.log({ text, phonemes });
-                audio.save(`audio-${i++}.wav`);
-            }
-        })();
-
-        const tokens = text.match(/\s*\S+/g);
-        for (const token of tokens) {
-            splitter.push(token);
-            await new Promise((resolve) => setTimeout(resolve, 10));
+        const cleanText = text?.trim();
+        if (!cleanText) {
+            return;
         }
-        splitter.close();
+
+        const response = await chrome.runtime.sendMessage({
+            action: "speakText",
+            text: cleanText,
+        });
+
+        if (response?.status === "error") {
+            throw new Error(response.error || "Speech playback failed");
+        }
     }
 
+    async stop() {
+        await chrome.runtime.sendMessage({ action: "stopSpeaking" });
+    }
 }
 
-let SETTINGS = new SettingConfig();
-SETTINGS.update_from_storage();
+const SETTINGS = new SettingConfig();
+SETTINGS.loadFromStorage().catch(console.error);
 
-/* ------------------ Speech ------------------ */
-async function speak(text) {
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = "en-US";
-    utterance.rate = SETTINGS.rate || 1;
-    utterance.pitch = SETTINGS.pitch || 1;
-
-    if (SETTINGS.voice) {
-        const voice = speechSynthesis
-            .getVoices()
-            .find(v => v.voiceURI === SETTINGS.voice);
-        if (voice) utterance.voice = voice;
+async function speakWithChromeTts(text) {
+    if (!text?.trim()) {
+        return { status: "error", error: "No text provided" };
     }
 
-    console.log("Speaking with settings:", {
-        voice: utterance.voice ? utterance.voice.name : "default",
-        rate: utterance.rate,
-        pitch: utterance.pitch,
-    });
+    const currentSettings = await loadSettings();
 
-    speechSynthesis.cancel();
-    setTimeout(() => speechSynthesis.speak(utterance), 50);
+    await chrome.tts.stop();
 
-    const response = await chrome.runtime.sendMessage({
-        action: "doSomething",
-        data: text
+    return new Promise((resolve, reject) => {
+        chrome.tts.speak(text, {
+            rate: currentSettings.rate || 1,
+            pitch: currentSettings.pitch || 1,
+            voiceName: currentSettings.voice || undefined,
+            onEvent: (event) => {
+                if (event.type === "end") {
+                    resolve({ status: "spoken" });
+                } else if (event.type === "interrupted" || event.type === "cancelled") {
+                    resolve({ status: "stopped" });
+                } else if (event.type === "error") {
+                    reject(new Error(event.errorMessage || "Speech playback failed"));
+                }
+            },
+        });
     });
 }
 
-/* ------------------ Floating Button ------------------ */
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== "sync") {
+        return;
+    }
+
+    const updatedKeys = [];
+    for (const [key, value] of Object.entries(changes)) {
+        if (key in DEFAULT_SETTINGS) {
+            SETTINGS[key] = value.newValue;
+            updatedKeys.push(key);
+        }
+    }
+
+    if (updatedKeys.length > 0) {
+        console.log(
+            "[Content] Settings updated via storage change:",
+            updatedKeys.join(", ")
+        );
+    }
+});
+
 function removeButton() {
     if (speakButton) {
         speakButton.remove();
@@ -110,8 +110,6 @@ function removeButton() {
 }
 
 function createButton(x, y, text) {
-    console.log("Creating speak button:", text);
-
     removeButton();
 
     speakButton = document.createElement("div");
@@ -119,172 +117,196 @@ function createButton(x, y, text) {
     speakButton.innerHTML = "🔊";
 
     Object.assign(speakButton.style, {
-        position: 'fixed',
-        top: `${y - 45}px`, // 45px above the highlight
+        position: "fixed",
+        top: `${y - 45}px`,
         left: `${x}px`,
-        zIndex: '2147483647', // Maximum possible z-index
-        padding: '6px 12px',
-        backgroundColor: '#202124',
-        color: 'white',
-        border: 'none',
-        borderRadius: '16px',
-        cursor: 'pointer',
-        fontSize: '13px',
-        fontFamily: 'sans-serif',
-        boxShadow: '0 2px 5px rgba(0,0,0,0.3)'
+        zIndex: "2147483647",
+        padding: "6px 12px",
+        backgroundColor: "#202124",
+        color: "white",
+        border: "none",
+        borderRadius: "16px",
+        cursor: "pointer",
+        fontSize: "13px",
+        fontFamily: "sans-serif",
+        boxShadow: "0 2px 5px rgba(0,0,0,0.3)",
     });
 
-    // 🔑 CRITICAL: Stop event from bubbling
-    speakButton.addEventListener("mousedown", (e) => {
-        e.stopPropagation();
-    });
-
-    speakButton.addEventListener("click", (e) => {
-        e.stopPropagation();
-        console.log("Speak button clicked");
-        speak(text);
+    speakButton.addEventListener("mousedown", (event) => event.stopPropagation());
+    speakButton.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        try {
+            await SETTINGS.speak(text);
+        } catch (error) {
+            console.error("[Content] Speak button failed:", error);
+            alert("Talking AI could not play speech." + error);
+        }
     });
 
     document.body.appendChild(speakButton);
 }
 
-// chrome.commands.onCommand.addListener((command) => {
-//     if (command === "get-pdf-selection") {
-//         chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-//             chrome.tabs.sendMessage(tabs[0].id, { action: "trigger-capture" });
-//         });
-//     }
-// });
-
-/* ------------------ Selection Listener ------------------ */
-document.addEventListener("mouseup", (e) => {
-
-    const pdfEmbeded = document.querySelector('embed[type="application/pdf"]');
+document.addEventListener("mouseup", () => {
     const selection = window.getSelection();
-    const text = selection.toString().trim();
+    const text = selection?.toString().trim();
 
-
-    console.log("Checking embeded PDF: ", pdfEmbeded);
-    console.log("Checking Selection: ", selection, text);
-    // const selection = window.getSelection();
-    // const text = selection.toString().trim();
-
-    if (!text || text === lastSelectionText) return;
-    if (selection.rangeCount === 0) return;
+    if (!text || text === lastSelectionText || selection.rangeCount === 0) {
+        return;
+    }
 
     lastSelectionText = text;
 
     const rect = selection.getRangeAt(0).getBoundingClientRect();
-
-    createButton(
-        rect.right + window.scrollX + 6,
-        rect.top + window.scrollY - 10,
-        text
-    );
+    createButton(rect.right + window.scrollX + 6, rect.top + window.scrollY - 10, text);
 });
 
-/* ------------------ Click Outside Cleanup ------------------ */
-document.addEventListener("mousedown", (e) => {
-    if (speakButton && !speakButton.contains(e.target)) {
+document.addEventListener("mousedown", (event) => {
+    if (speakButton && !speakButton.contains(event.target)) {
         removeButton();
     }
 });
 
-
-
-/* ------------------ Helper Functions ------------------ */
-function getReadableText() {
-    return document.body.innerText.trim();
-}
-
-chrome.storage.sync.get(SETTINGS, (items) => {
-    SETTINGS = { ...SETTINGS, ...items };
-});
-
 async function explainText(text) {
-    const prompt = SETTINGS.customPrompt || `Explain the following text in simple terms: ${text}`;
+    const prompt = SETTINGS.customPrompt
+        || `Explain the following text in simple terms: ${text}`;
 
-    try {
-        const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${SETTINGS.apiKey}`,
-            },
-            body: JSON.stringify({
-                model: SETTINGS.model,
-                messages: [{ role: "user", content: prompt }],
-            }),
-        });
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${SETTINGS.apiKey}`,
+        },
+        body: JSON.stringify({
+            model: SETTINGS.model,
+            messages: [{ role: "user", content: prompt }],
+        }),
+    });
 
-        if (!response.ok) {
-            throw new Error("Network response was not ok");
-        }
-
-
-        const data = await response.json();
-        return data.choices[0].message.content.trim();
-    } catch (error) {
-        console.error("Error explaining text:", error);
-        return "Sorry, I couldn't explain the text.";
+    if (!response.ok) {
+        throw new Error(`OpenRouter error: ${response.statusText}`);
     }
+
+    const data = await response.json();
+    return data.choices[0]?.message?.content?.trim() || "";
 }
 
+function getReadableText() {
+    return document.body?.innerText?.trim() || "";
+}
 
-/* ------------------ Chrome Messages ------------------ */
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    console.log("Received message:", message);
+chrome.runtime.onMessage.addListener(async (message, _sender, sendResponse) => {
+    console.log("[Content] Received message:", message.action);
 
-    if (message.action === "readAloud") {
-        speak(getReadableText());
-        sendResponse({ status: "reading" });
-    }
+    switch (message.action) {
+        case "readAloud":
+            SETTINGS.speak(getReadableText())
+                .then(() => sendResponse({ status: "reading" }))
+                .catch((error) => {
+                    console.error("[Content] readAloud failed:", error);
+                    sendResponse({ status: "error", error: error.message });
+                });
+            return true;
 
-    if (message.action === "stopReading") {
-        speechSynthesis.cancel();
-        sendResponse({ status: "stopped" });
-    }
+        case "stopReading":
+            SETTINGS.stop()
+                .then(() => sendResponse({ status: "stopped" }))
+                .catch((error) => {
+                    console.error("[Content] stopReading failed:", error);
+                    sendResponse({ status: "error", error: error.message });
+                });
+            return true;
 
-    if (message.action === "explainText") {
-        (async () => {
-            const selection = window.getSelection().toString().trim();
+        case "explainText": {
+            const selection = window.getSelection()?.toString().trim();
             if (!selection) {
-                alert("Please select some text first");
-                return;
+                alert("Please select some text first.");
+                sendResponse({ status: "no selection" });
+                return false;
             }
-            const explanation = await explainText(selection);
-            speak(explanation);
-            sendResponse({ status: "explained" });
-        })();
-        return true; // required for async
-    }
 
-    if (message.action === "updateSettings") {
-        SETTINGS = { ...SETTINGS, ...message.settings };
-        console.log("Updated settings:", SETTINGS);
-        sendResponse({ status: "settings updated" });
-    }
-
-    if (message.action === "trigger-capture") {
-        const pdfEmbed = document.querySelector('embed[type="application/pdf"]');
-        if (!pdfEmbed) {
-            console.log("No native PDF viewer found.")
-            return;
+            (async () => {
+                try {
+                    const explanation = await explainText(selection);
+                    await SETTINGS.speak(explanation);
+                    sendResponse({ status: "explained" });
+                } catch (error) {
+                    console.error("[Content] explainText failed:", error);
+                    sendResponse({ status: "error", error: error.message });
+                }
+            })();
+            return true;
         }
 
-        window.addEventListener('message', function onMessage(e) {
-            if (e.data && e.data.type === 'getSelectedTextReply') {
-                window.removeEventListener('message', onMessage);
-                const text = e.data.selectedText;
-                if (text) {
-                    speak(text);
-                    SETTINGS.speak(text);
-                } else {
-                    alert("No text selected.");
-                }
-            }
-        }, { once: true });
+        case "updateSettings": {
+            const incomingSettings = message.settings || {};
+            const updatedKeys = Object.keys(incomingSettings).filter(
+                (key) => key in DEFAULT_SETTINGS
+            );
 
-        pdfEmbed.postMessage({ type: 'getSelectedText' }, '*');
+            if (updatedKeys.length > 0) {
+                Object.assign(SETTINGS, incomingSettings);
+                console.log(
+                    "[Content] Applied settings update from background:",
+                    updatedKeys.join(", ")
+                );
+            } else {
+                SETTINGS.loadFromStorage().catch((error) => {
+                    console.error("[Content] Failed to reload settings:", error);
+                });
+                console.log(
+                    "[Content] No settings in update message, reloading from storage."
+                );
+            }
+
+            sendResponse({ status: "settings updated" });
+            return false;
+        }
+
+        case "trigger-capture": {
+            const pdfEmbed = document.querySelector('embed[type="application/pdf"]');
+            if (!pdfEmbed) {
+                console.warn("[Content] No native PDF viewer found.");
+                sendResponse({ status: "no pdf" });
+                return false;
+            }
+
+            window.addEventListener("message", function onMessage(event) {
+                if (event.data?.type !== "getSelectedTextReply") {
+                    return;
+                }
+
+                window.removeEventListener("message", onMessage);
+
+                const text = event.data.selectedText;
+                if (!text) {
+                    alert("No text selected in PDF.");
+                    return;
+                }
+
+                SETTINGS.speak(text).catch((error) => {
+                    console.error("[Content] PDF speech failed:", error);
+                    alert("Talking AI could not play speech.");
+                });
+            }, { once: true });
+
+            pdfEmbed.postMessage({ type: "getSelectedText" }, "*");
+            sendResponse({ status: "capture triggered" });
+            return false;
+        }
+        case "speakText": {
+            await speakWithChromeTts(message.text)
+                .then(sendResponse)
+                .catch((error) => {
+                    console.error("[Service Worker] speakText failed:", error);
+                    sendResponse({ status: "error", error: error.message });
+                });
+            return true;
+        }
+
+
+        default:
+            console.warn("[Content] Unknown action:", message.action);
+            sendResponse({ status: "unknown action" });
+            return false;
     }
 });
