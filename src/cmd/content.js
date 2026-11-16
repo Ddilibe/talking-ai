@@ -13,6 +13,99 @@ const DEFAULT_SETTINGS = {
 
 let speakButton = null;
 let lastSelectionText = "";
+let warningElement = null;
+
+function isExtensionContextValid() {
+    try {
+        return typeof chrome !== "undefined" && Boolean(chrome.runtime?.id);
+    } catch (error) {
+        console.warn("[Content] Extension context check failed:", error);
+        return false;
+    }
+}
+
+function showWarning(message) {
+    if (!document.body) {
+        console.warn("[Content] Cannot display warning yet:", message);
+        return;
+    }
+
+    if (warningElement) {
+        warningElement.remove();
+    }
+
+    const warning = document.createElement("div");
+    warning.id = "talking-ai-warning";
+    warning.setAttribute("role", "alert");
+    warning.textContent = message;
+
+    Object.assign(warning.style, {
+        position: "fixed",
+        right: "16px",
+        bottom: "16px",
+        zIndex: "2147483647",
+        maxWidth: "320px",
+        padding: "10px 14px",
+        backgroundColor: "#202124",
+        color: "white",
+        borderRadius: "10px",
+        boxShadow: "0 2px 8px rgba(0,0,0,0.35)",
+        fontSize: "13px",
+        fontFamily: "sans-serif",
+        lineHeight: "1.4",
+    });
+
+    document.body.appendChild(warning);
+    warningElement = warning;
+
+    window.setTimeout(() => {
+        if (warningElement === warning) {
+            warning.remove();
+            warningElement = null;
+        }
+    }, 6000);
+}
+
+function speakWithWebSpeech(text) {
+    return new Promise((resolve, reject) => {
+        if (
+            typeof window.speechSynthesis === "undefined" ||
+            typeof SpeechSynthesisUtterance === "undefined"
+        ) {
+            reject(new Error("Speech synthesis is not supported on this page."));
+            return;
+        }
+
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.rate = SETTINGS.rate || 1;
+        utterance.pitch = SETTINGS.pitch || 1;
+
+        if (SETTINGS.voice) {
+            const voice = window.speechSynthesis
+                .getVoices()
+                .find(
+                    (candidate) =>
+                        candidate.voiceURI === SETTINGS.voice ||
+                        candidate.name === SETTINGS.voice
+                );
+            if (voice) {
+                utterance.voice = voice;
+            }
+        }
+
+        utterance.onend = () => resolve({ status: "spoken-fallback" });
+        utterance.onerror = (event) => {
+            if (event.error === "interrupted" || event.error === "canceled") {
+                resolve({ status: "stopped" });
+                return;
+            }
+            reject(new Error(event.error || "Web Speech playback failed"));
+        };
+
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(utterance);
+    });
+}
 
 class SettingConfig {
     constructor() {
@@ -31,54 +124,74 @@ class SettingConfig {
     async speak(text) {
         const cleanText = text?.trim();
         if (!cleanText) {
-            return;
+            throw new Error("No text selected to read aloud.");
         }
 
-        const response = await chrome.runtime.sendMessage({
-            action: "speakText",
-            text: cleanText,
-        });
+        let lastError = null;
 
-        if (response?.status === "error") {
-            throw new Error(response.error || "Speech playback failed");
+        if (isExtensionContextValid()) {
+            for (let attempt = 1; attempt <= 2; attempt += 1) {
+                try {
+                    const response = await chrome.runtime.sendMessage({
+                        action: "speakText",
+                        text: cleanText,
+                    });
+
+                    if (response?.status === "error") {
+                        throw new Error(response.error || "Speech playback failed");
+                    }
+
+                    return response;
+                } catch (error) {
+                    lastError = error;
+                    console.warn(
+                        `[Content] Speech attempt ${attempt} failed:`,
+                        error
+                    );
+
+                    if (attempt < 2) {
+                        await new Promise((resolve) =>
+                            setTimeout(resolve, 250 * attempt)
+                        );
+                    }
+                }
+            }
+        } else {
+            lastError = new Error(
+                "Talking AI is unavailable on this page. Try reloading the page."
+            );
+            console.warn(
+                "[Content] Extension context unavailable, using Web Speech fallback."
+            );
+        }
+
+        try {
+            const fallbackResponse = await speakWithWebSpeech(cleanText);
+            console.log("[Content] Used Web Speech fallback successfully.");
+            return fallbackResponse;
+        } catch (fallbackError) {
+            console.error("[Content] Web Speech fallback failed:", fallbackError);
+            throw lastError || fallbackError;
         }
     }
 
     async stop() {
-        await chrome.runtime.sendMessage({ action: "stopSpeaking" });
+        try {
+            if (isExtensionContextValid()) {
+                await chrome.runtime.sendMessage({ action: "stopSpeaking" });
+            }
+        } catch (error) {
+            console.warn("[Content] Failed to stop extension speech:", error);
+        }
+
+        if (typeof window.speechSynthesis !== "undefined") {
+            window.speechSynthesis.cancel();
+        }
     }
 }
 
 const SETTINGS = new SettingConfig();
 SETTINGS.loadFromStorage().catch(console.error);
-
-
-async function speakWithChromeTts(text) {
-    if (!text?.trim()) {
-        return { status: "error", error: "No text provided" };
-    }
-
-    const currentSettings = await loadSettings();
-
-    await chrome.tts.stop();
-
-    return new Promise((resolve, reject) => {
-        chrome.tts.speak(text, {
-            rate: currentSettings.rate || 1,
-            pitch: currentSettings.pitch || 1,
-            voiceName: currentSettings.voice || undefined,
-            onEvent: (event) => {
-                if (event.type === "end") {
-                    resolve({ status: "spoken" });
-                } else if (event.type === "interrupted" || event.type === "cancelled") {
-                    resolve({ status: "stopped" });
-                } else if (event.type === "error") {
-                    reject(new Error(event.errorMessage || "Speech playback failed"));
-                }
-            },
-        });
-    });
-}
 
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -139,7 +252,10 @@ function createButton(x, y, text) {
             await SETTINGS.speak(text);
         } catch (error) {
             console.error("[Content] Speak button failed:", error);
-            alert("Talking AI could not play speech." + error);
+            showWarning(
+                error?.message ||
+                "Talking AI could not play speech on this page. Try selecting the text again or reloading."
+            );
         }
     });
 
@@ -203,6 +319,10 @@ chrome.runtime.onMessage.addListener(async (message, _sender, sendResponse) => {
                 .then(() => sendResponse({ status: "reading" }))
                 .catch((error) => {
                     console.error("[Content] readAloud failed:", error);
+                    showWarning(
+                        error?.message ||
+                        "Talking AI could not read this page aloud."
+                    );
                     sendResponse({ status: "error", error: error.message });
                 });
             return true;
@@ -219,7 +339,7 @@ chrome.runtime.onMessage.addListener(async (message, _sender, sendResponse) => {
         case "explainText": {
             const selection = window.getSelection()?.toString().trim();
             if (!selection) {
-                alert("Please select some text first.");
+                showWarning("Please select some text first.");
                 sendResponse({ status: "no selection" });
                 return false;
             }
@@ -231,6 +351,10 @@ chrome.runtime.onMessage.addListener(async (message, _sender, sendResponse) => {
                     sendResponse({ status: "explained" });
                 } catch (error) {
                     console.error("[Content] explainText failed:", error);
+                    showWarning(
+                        error?.message ||
+                        "Talking AI could not explain the selected text."
+                    );
                     sendResponse({ status: "error", error: error.message });
                 }
             })();
@@ -266,6 +390,9 @@ chrome.runtime.onMessage.addListener(async (message, _sender, sendResponse) => {
             const pdfEmbed = document.querySelector('embed[type="application/pdf"]');
             if (!pdfEmbed) {
                 console.warn("[Content] No native PDF viewer found.");
+                showWarning(
+                    "Talking AI could not find a PDF on this page. Open the PDF in Chrome's viewer and try again."
+                );
                 sendResponse({ status: "no pdf" });
                 return false;
             }
@@ -279,13 +406,16 @@ chrome.runtime.onMessage.addListener(async (message, _sender, sendResponse) => {
 
                 const text = event.data.selectedText;
                 if (!text) {
-                    alert("No text selected in PDF.");
+                    showWarning("No text selected in the PDF.");
                     return;
                 }
 
                 SETTINGS.speak(text).catch((error) => {
                     console.error("[Content] PDF speech failed:", error);
-                    alert("Talking AI could not play speech.");
+                    showWarning(
+                        error?.message ||
+                        "Talking AI could not play speech in this PDF."
+                    );
                 });
             }, { once: true });
 
@@ -293,17 +423,6 @@ chrome.runtime.onMessage.addListener(async (message, _sender, sendResponse) => {
             sendResponse({ status: "capture triggered" });
             return false;
         }
-        case "speakText": {
-            await speakWithChromeTts(message.text)
-                .then(sendResponse)
-                .catch((error) => {
-                    console.error("[Service Worker] speakText failed:", error);
-                    sendResponse({ status: "error", error: error.message });
-                });
-            return true;
-        }
-
-
         default:
             console.warn("[Content] Unknown action:", message.action);
             sendResponse({ status: "unknown action" });
